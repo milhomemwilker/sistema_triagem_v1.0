@@ -2,6 +2,10 @@
 
 Aplicação web educacional em HTML, CSS e JavaScript para cadastro de pacientes, registro de triagens e organização da fila por classificação. Funciona sem backend e armazena os dados no navegador.
 
+## Relatório de bugs e correções
+
+Consulte o [Relatório de bugs e correções](RELATORIO_DE_BUGS.md) para conhecer os **13 problemas identificados**, suas prioridades, causas, soluções aplicadas e resultados dos testes. O detalhamento está em um arquivo separado para facilitar a consulta e a manutenção da documentação.
+
 ## Funcionalidades
 
 - Cadastro, pesquisa e remoção de pacientes.
