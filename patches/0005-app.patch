@@ -1,0 +1,26 @@
+--- a/assets/app.js
++++ b/assets/app.js
+@@ -80,6 +80,7 @@
+     this.registration = new PatientRegistration(this.state, this.dom, {
+       showMessage: (target, message) => this.showMessage(target, message),
+       renderAll: () => this.renderAll(),
++      selectPatient: (id) => this.triage.selectPatient(id),
+       setScreen: (screen) => this.navigation.setScreen(screen)
+     });
+     this.triage = new TriageController(this.state, this.dom, {
+@@ -125,13 +126,12 @@
+     this.triage.init();
+     this.queue.init();
+     this.renderAll();
++    if (this.state.storageError) this.showMessage(this.dom.patientMessage, this.state.storageError);
+   }
+ 
+   showMessage(target, message) {
+     target.textContent = message;
+-    window.setTimeout(() => {
+-      target.textContent = "";
+-    }, 2800);
++    // Keep validation messages visible until the next action.
+   }
+ 
+   renderAll() {

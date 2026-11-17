@@ -1,0 +1,440 @@
+--- a/assets/state.js
++++ b/assets/state.js
+@@ -1,25 +1,47 @@
++function createRecordId() {
++  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
++  const bytes = crypto.getRandomValues(new Uint8Array(16));
++  bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
++  const hex = Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
++  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
++}
++// Escape all user-controlled values before HTML interpolation.
++function escapeHTML(value) {
++  return String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
++}
++function normalizeSearch(value) { return String(value).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim(); }
+ class AppState {
+   constructor(patientStorageKey, triageStorageKey) {
+     this.patientStorageKey = patientStorageKey;
+     this.triageStorageKey = triageStorageKey;
+-    this.patients = JSON.parse(localStorage.getItem(patientStorageKey) || "[]");
+-    this.triages = JSON.parse(localStorage.getItem(triageStorageKey) || "[]");
++    this.snapshotKey = patientStorageKey + "_snapshot_v2";
+     this.activeScreen = "cadastro";
+     this.selectedPatientId = "";
++    this.patients = []; this.triages = []; this.storageError = ""; this.storageBlocked = false;
++    try {
++      const snapshot = localStorage.getItem(this.snapshotKey);
++      const data = snapshot ? JSON.parse(snapshot) : {
++        patients: JSON.parse(localStorage.getItem(patientStorageKey) || "[]"),
++        triages: JSON.parse(localStorage.getItem(triageStorageKey) || "[]")
++      };
++      if (!Array.isArray(data.patients) || !Array.isArray(data.triages) ||
++          !data.patients.every(x => x && typeof x.id === "string" && typeof x.firstName === "string" && typeof x.lastName === "string") ||
++          !data.triages.every(x => x && typeof x.id === "string" && typeof x.patientId === "string" && ["branco","verde","amarelo","vermelho"].includes(x.classification))) throw Error("Formato inválido");
++      this.patients = data.patients; this.triages = data.triages;
++    } catch (error) {
++      this.storageBlocked = true;
++      this.storageError = "Não foi possível carregar os dados salvos. Os originais foram preservados. Recupere o armazenamento antes de cadastrar ou alterar registros.";
++    }
+   }
+-
+   save() {
+-    localStorage.setItem(this.patientStorageKey, JSON.stringify(this.patients));
+-    localStorage.setItem(this.triageStorageKey, JSON.stringify(this.triages));
++    if (this.storageBlocked) { window.alert(this.storageError); return false; }
++    try {
++      // One atomic write; original legacy keys remain available for recovery.
++      localStorage.setItem(this.snapshotKey, JSON.stringify({patients:this.patients,triages:this.triages}));
++      return true;
++    } catch (error) { window.alert("Não foi possível salvar. A alteração foi cancelada; verifique o armazenamento do navegador."); return false; }
+   }
+-
+-  getPatientName(patient) {
+-    return `${patient.firstName} ${patient.lastName}`;
+-  }
+-
+-  getSelectedPatient() {
+-    return this.patients.find((patient) => patient.id === this.selectedPatientId);
+-  }
++  getPatientName(patient) { return `${patient.firstName} ${patient.lastName}`; }
++  getSelectedPatient() { return this.patients.find(patient => patient.id === this.selectedPatientId); }
+ }
+-
+ window.AppState = AppState;
+--- a/assets/cadastro.js
++++ b/assets/cadastro.js
+@@ -16,7 +16,7 @@
+     event.preventDefault();
+     const data = new FormData(this.dom.patientForm);
+     const patient = {
+-      id: crypto.randomUUID(),
++      id: createRecordId(),
+       firstName: data.get("firstName").trim(),
+       lastName: data.get("lastName").trim(),
+       age: data.get("age"),
+@@ -32,9 +32,13 @@
+       this.callbacks.showMessage(this.dom.patientMessage, "Preencha os campos obrigatórios.");
+       return;
+     }
++    if (!/^\d+$/.test(String(patient.age).trim()) || !Number.isInteger(Number(patient.age)) || Number(patient.age) < 0 || Number(patient.age) > 150) {
++      this.callbacks.showMessage(this.dom.patientMessage, "Informe uma idade inteira entre 0 e 150."); return;
++    }
+     this.state.patients.push(patient);
++    if (!this.state.save()) { this.state.patients.pop(); return; }
++    this.callbacks.selectPatient(patient.id);
+     this.state.selectedPatientId = patient.id;
+-    this.state.save();
+     this.reset();
+     this.callbacks.showMessage(this.dom.patientMessage, "Paciente cadastrado.");
+     this.callbacks.renderAll();
+@@ -44,17 +48,19 @@
+     const selectButton = event.target.closest("[data-select-patient]");
+     const deleteButton = event.target.closest("[data-delete-patient]");
+     if (selectButton) {
+-      this.state.selectedPatientId = selectButton.dataset.selectPatient;
++      this.callbacks.selectPatient(selectButton.dataset.selectPatient);
+       this.callbacks.setScreen("triagem");
+       this.callbacks.renderAll();
+     }
+     if (deleteButton) {
+-      const index = Number(deleteButton.dataset.deletePatient);
+-      const removed = this.state.patients.splice(index, 1)[0];
+-      if (removed) {
+-        this.state.triages = this.state.triages.filter((triage) => triage.patientId !== removed.id);
+-      }
+-      this.state.save();
++      const id = deleteButton.dataset.deletePatient;
++      if (!this.state.patients.some(patient => patient.id === id)) return;
++      const previousPatients = this.state.patients;
++      const previousTriages = this.state.triages;
++      this.state.patients = previousPatients.filter(patient => patient.id !== id);
++      this.state.triages = previousTriages.filter(triage => triage.patientId !== id);
++      if (!this.state.save()) { this.state.patients = previousPatients; this.state.triages = previousTriages; return; }
++      if (this.state.selectedPatientId === id) this.callbacks.selectPatient("");
+       this.callbacks.renderAll();
+     }
+   }
+@@ -64,8 +70,8 @@
+   }
+ 
+   render() {
+-    const search = this.dom.patientSearch.value;
+-    const patients = this.state.patients.filter((patient) => patient.firstName.includes(search));
++    const search = normalizeSearch(this.dom.patientSearch.value);
++    const patients = this.state.patients.filter((patient) => normalizeSearch(this.state.getPatientName(patient)).includes(search));
+     if (patients.length === 0) {
+       this.dom.patientList.innerHTML = `<div class="empty-state">Nenhum paciente na recepção.</div>`;
+       return;
+@@ -74,16 +80,16 @@
+       <article class="patient-card">
+         <header>
+           <div>
+-            <strong>${this.state.getPatientName(patient)}</strong>
+-            <small>${patient.age} anos · ${patient.gender}</small>
++            <strong>${escapeHTML(this.state.getPatientName(patient))}</strong>
++            <small>${escapeHTML(patient.age)} anos · ${escapeHTML(patient.gender)}</small>
+           </div>
+-          <span class="tag">${patient.insurancePlan}</span>
++          <span class="tag">${escapeHTML(patient.insurancePlan)}</span>
+         </header>
+-        <div class="meta-line">${patient.address}</div>
+-        <div class="meta-line">${patient.insuranceName} · ${patient.insuranceCard}</div>
++        <div class="meta-line">${escapeHTML(patient.address)}</div>
++        <div class="meta-line">${escapeHTML(patient.insuranceName)} · ${escapeHTML(patient.insuranceCard)}</div>
+         <div class="patient-actions">
+-          <button class="small-button" data-select-patient="${patient.id}" type="button">Triar</button>
+-          <button class="small-button danger-button" data-delete-patient="${index}" type="button">Remover</button>
++          <button class="small-button" data-select-patient="${escapeHTML(patient.id)}" type="button">Triar</button>
++          <button class="small-button danger-button" data-delete-patient="${escapeHTML(patient.id)}" type="button">Remover</button>
+         </div>
+       </article>
+     `).join("");
+--- a/assets/triagem.js
++++ b/assets/triagem.js
+@@ -16,29 +16,43 @@
+     this.dom.clearTriageForm.addEventListener("click", () => this.reset());
+   }
+ 
+-  selectPatient() {
+-    this.state.selectedPatientId = this.dom.triagePatient.value;
+-    this.renderPatientSummary();
++  selectPatient(id = this.dom.triagePatient.value) {
++    if (id !== this.state.selectedPatientId) {
++      this.dom.triageForm.reset();
++      this.dom.riskSuggestion.textContent = "Sem sugestão";
++      this.dom.triageMessage.textContent = "";
++    }
++    this.state.selectedPatientId = this.state.patients.some(p => p.id === id) ? id : "";
++    this.renderPatientOptions(); this.renderPatientSummary(); this.renderVitalPreview();
+   }
+-
+   parseBloodPressure(value) {
+-    const parts = value.split("-");
+-    return {
+-      systolic: Number(parts[0]),
+-      diastolic: Number(parts[1])
+-    };
++    const parts = String(value).trim().match(/^(\d{1,3})\s*\/\s*(\d{1,3})$/);
++    if (!parts) return {systolic:NaN, diastolic:NaN};
++    return {systolic:Number(parts[1]), diastolic:Number(parts[2])};
+   }
+-
++  readVitals() {
++    const read = id => document.getElementById(id).value.trim();
++    const decimal = value => /^(?:\d+(?:[.,]\d+)?|[.,]\d+)$/.test(value) ? Number(value.replace(",", ".")) : NaN;
++    const pressure = this.parseBloodPressure(read("bloodPressure"));
++    const temperature = decimal(read("temperature")), oxygen = decimal(read("oxygen"));
++    const heartRate = read("heartRate") ? decimal(read("heartRate")) : null;
++    const symptoms = read("symptoms");
++    let error = "";
++    if (!Number.isFinite(pressure.systolic) || !Number.isFinite(pressure.diastolic) || pressure.systolic <= 0 || pressure.diastolic <= 0 || pressure.systolic <= pressure.diastolic) error = "Informe pressão válida no formato 120/80, com sistólica maior que diastólica.";
++    else if (!Number.isFinite(temperature) || temperature <= 0) error = "Informe temperatura numérica positiva, com ponto ou vírgula.";
++    else if (!Number.isFinite(oxygen) || oxygen < 0 || oxygen > 100) error = "Informe oxigenação entre 0 e 100%.";
++    else if (heartRate !== null && (!Number.isInteger(heartRate) || heartRate <= 0)) error = "Informe frequência cardíaca inteira positiva ou deixe em branco.";
++    else if (!symptoms) error = "Informe sintomas e observações.";
++    return {pressure,temperature,oxygen,heartRate,symptoms,error};
++  }
+   normalizeClassification(value) {
+     return value || "branco";
+   }
+ 
+   calculateSuggestion() {
+-    const pressure = this.parseBloodPressure(document.getElementById("bloodPressure").value);
+-    const temperature = parseInt(document.getElementById("temperature").value, 10);
+-    const oxygen = Number(document.getElementById("oxygen").value);
+-    const symptoms = document.getElementById("symptoms").value.toLowerCase();
+-    const heartRate = Number(document.getElementById("heartRate").value);
++    const {pressure, temperature, oxygen, symptoms: rawSymptoms, heartRate, error} = this.readVitals();
++    if (error) return null;
++    const symptoms = rawSymptoms.toLowerCase();
+     let risk = "verde";
+     if (oxygen < 90 || pressure.systolic >= 180 || temperature >= 38.5 || symptoms.includes("dor no peito") || symptoms.includes("convuls")) {
+       risk = "vermelho";
+@@ -51,6 +65,13 @@
+   }
+ 
+   suggestRisk() {
++    const vitals = this.readVitals();
++    if (vitals.error) {
++      this.callbacks.showMessage(this.dom.triageMessage, vitals.error);
++      this.dom.riskSuggestion.textContent = "Dados inválidos";
++      document.querySelectorAll('[name="classification"]').forEach(input => input.checked = false);
++      return;
++    }
+     const risk = this.calculateSuggestion();
+     const riskInput = document.querySelector(`[name="classification"][value="${risk}"]`);
+     if (riskInput) {
+@@ -62,13 +83,20 @@
+   handleSubmit(event) {
+     event.preventDefault();
+     const data = new FormData(this.dom.triageForm);
+-    const classification = this.normalizeClassification(data.get("classification"));
++    const classification = data.get("classification");
++    const vitals = this.readVitals();
++    if (vitals.error) { this.callbacks.showMessage(this.dom.triageMessage, vitals.error); return; }
++    if (!Object.hasOwn(this.priorityLabels, classification)) { this.callbacks.showMessage(this.dom.triageMessage, "Selecione uma classificação."); return; }
++    if (!this.state.getSelectedPatient()) { this.callbacks.showMessage(this.dom.triageMessage, "Selecione um paciente válido."); return; }
++    if (this.state.triages.some(item => item.patientId === this.state.selectedPatientId)) {
++      this.callbacks.showMessage(this.dom.triageMessage, "Este paciente já está na fila. Não é possível duplicar a triagem."); return;
++    }
+     if (!this.state.selectedPatientId || !data.get("bloodPressure") || !data.get("temperature") || !data.get("oxygen") || !data.get("symptoms")) {
+       this.callbacks.showMessage(this.dom.triageMessage, "Preencha todos os dados da triagem.");
+       return;
+     }
+     this.state.triages.push({
+-      id: crypto.randomUUID(),
++      id: createRecordId(),
+       patientId: this.state.selectedPatientId,
+       bloodPressure: data.get("bloodPressure"),
+       temperature: data.get("temperature"),
+@@ -76,12 +104,13 @@
+       heartRate: data.get("heartRate"),
+       symptoms: data.get("symptoms").trim(),
+       classification,
++      createdAt: new Date().toISOString(),
+       time: new Date().toLocaleTimeString("pt-BR", {
+         hour: "2-digit",
+         minute: "2-digit"
+       })
+     });
+-    this.state.save();
++    if (!this.state.save()) { this.state.triages.pop(); return; }
+     this.reset();
+     this.callbacks.showMessage(this.dom.triageMessage, "Triagem registrada.");
+     this.callbacks.renderAll();
+@@ -102,7 +131,7 @@
+       return;
+     }
+     this.dom.triagePatient.innerHTML = `<option value="">Selecionar paciente</option>` + this.state.patients.map((patient) => `
+-      <option value="${patient.id}">${patient.firstName}</option>
++      <option value="${escapeHTML(patient.id)}">${escapeHTML(this.state.getPatientName(patient))} — ${escapeHTML(patient.id)}</option>
+     `).join("");
+     this.dom.triagePatient.value = this.state.selectedPatientId;
+   }
+@@ -114,11 +143,11 @@
+       return;
+     }
+     this.dom.patientSummary.innerHTML = `
+-      <div class="summary-row"><span>Nome</span><strong>${this.state.getPatientName(patient)}</strong></div>
+-      <div class="summary-row"><span>Idade</span><strong>${patient.age}</strong></div>
+-      <div class="summary-row"><span>Gênero</span><strong>${patient.gender}</strong></div>
+-      <div class="summary-row"><span>Convênio</span><strong>${patient.insuranceName}</strong></div>
+-      <div class="summary-row"><span>Plano</span><strong>${patient.insurancePlan}</strong></div>
++      <div class="summary-row"><span>Nome</span><strong>${escapeHTML(this.state.getPatientName(patient))}</strong></div>
++      <div class="summary-row"><span>Idade</span><strong>${escapeHTML(patient.age)}</strong></div>
++      <div class="summary-row"><span>Gênero</span><strong>${escapeHTML(patient.gender)}</strong></div>
++      <div class="summary-row"><span>Convênio</span><strong>${escapeHTML(patient.insuranceName)}</strong></div>
++      <div class="summary-row"><span>Plano</span><strong>${escapeHTML(patient.insurancePlan)}</strong></div>
+     `;
+   }
+ 
+@@ -129,9 +158,9 @@
+     const oxygenNumber = Number(oxygen);
+     const oxygenClass = oxygenNumber < 90 ? "alert" : "";
+     this.dom.vitalPreview.innerHTML = `
+-      <div class="vital-row"><span>Pressão</span><strong>${pressure}</strong></div>
+-      <div class="vital-row"><span>Temperatura</span><strong>${temperature} °C</strong></div>
+-      <div class="vital-row"><span>Oxigenação</span><strong class="${oxygenClass}">${oxygen}%</strong></div>
++      <div class="vital-row"><span>Pressão</span><strong>${escapeHTML(pressure)}</strong></div>
++      <div class="vital-row"><span>Temperatura</span><strong>${escapeHTML(temperature)} °C</strong></div>
++      <div class="vital-row"><span>Oxigenação</span><strong class="${escapeHTML(oxygenClass)}">${escapeHTML(oxygen)}%</strong></div>
+     `;
+   }
+ }
+--- a/assets/fila.js
++++ b/assets/fila.js
+@@ -11,14 +11,25 @@
+     this.dom.callNext.addEventListener("click", () => this.callNext());
+   }
+ 
++  orderedTriages() {
++    const priorities = {vermelho:0, amarelo:1, verde:2, branco:3};
++    return this.state.triages.map((item,index) => ({item,index})).sort((a,b) => {
++      const priority = (priorities[a.item.classification] ?? 4) - (priorities[b.item.classification] ?? 4);
++      if (priority) return priority;
++      const ta = Date.parse(a.item.createdAt), tb = Date.parse(b.item.createdAt);
++      return Number.isFinite(ta) && Number.isFinite(tb) ? ta-tb || a.index-b.index : a.index-b.index;
++    }).map(entry => entry.item);
++  }
+   callNext() {
+     if (this.state.triages.length === 0) {
+       return;
+     }
+-    const called = this.state.triages.shift();
++    const called = this.orderedTriages()[0];
++    const previous = this.state.triages;
++    this.state.triages = previous.filter(item => item.id !== called.id);
++    if (!this.state.save()) { this.state.triages = previous; return; }
+     const patient = this.state.patients.find((item) => item.id === called.patientId);
+     window.alert(`${patient ? this.state.getPatientName(patient) : "Paciente"} encaminhado para atendimento.`);
+-    this.state.save();
+     this.callbacks.renderAll();
+   }
+ 
+@@ -27,26 +38,26 @@
+       this.dom.queueBoard.innerHTML = `<div class="empty-state">Nenhum paciente aguardando atendimento.</div>`;
+       return;
+     }
+-    this.dom.queueBoard.innerHTML = this.state.triages.map((triage) => {
++    this.dom.queueBoard.innerHTML = this.orderedTriages().map((triage) => {
+       const patient = this.state.patients.find((item) => item.id === triage.patientId);
+       const patientName = patient ? this.state.getPatientName(patient) : "Paciente não encontrado";
+       return `
+         <article class="queue-card">
+-          <div class="risk-bar" style="background:${this.priorityColor[triage.classification]}"></div>
++          <div class="risk-bar" style="background:${escapeHTML(this.priorityColor[triage.classification])}"></div>
+           <div class="queue-body">
+             <header>
+               <div>
+-                <strong>${patientName}</strong>
+-                <small>Entrada ${triage.time}</small>
++                <strong>${escapeHTML(patientName)}</strong>
++                <small>Entrada ${escapeHTML(triage.time)}</small>
+               </div>
+-              <span class="tag ${triage.classification}">${this.priorityLabels[triage.classification]}</span>
++              <span class="tag ${escapeHTML(triage.classification)}">${escapeHTML(this.priorityLabels[triage.classification])}</span>
+             </header>
+             <div class="tag-row">
+-              <span class="tag">PA ${triage.bloodPressure}</span>
+-              <span class="tag">Temp ${triage.temperature} °C</span>
+-              <span class="tag">SpO2 ${triage.oxygen}%</span>
++              <span class="tag">PA ${escapeHTML(triage.bloodPressure)}</span>
++              <span class="tag">Temp ${escapeHTML(triage.temperature)} °C</span>
++              <span class="tag">SpO2 ${escapeHTML(triage.oxygen)}%</span>
+             </div>
+-            <p class="meta-line">${triage.symptoms}</p>
++            <p class="meta-line">${escapeHTML(triage.symptoms)}</p>
+           </div>
+         </article>
+       `;
+--- a/assets/app.js
++++ b/assets/app.js
+@@ -80,6 +80,7 @@
+     this.registration = new PatientRegistration(this.state, this.dom, {
+       showMessage: (target, message) => this.showMessage(target, message),
+       renderAll: () => this.renderAll(),
++      selectPatient: (id) => this.triage.selectPatient(id),
+       setScreen: (screen) => this.navigation.setScreen(screen)
+     });
+     this.triage = new TriageController(this.state, this.dom, {
+@@ -125,13 +126,12 @@
+     this.triage.init();
+     this.queue.init();
+     this.renderAll();
++    if (this.state.storageError) this.showMessage(this.dom.patientMessage, this.state.storageError);
+   }
+ 
+   showMessage(target, message) {
+     target.textContent = message;
+-    window.setTimeout(() => {
+-      target.textContent = "";
+-    }, 2800);
++    // Keep validation messages visible until the next action.
+   }
+ 
+   renderAll() {
+--- /dev/null
++++ b/tests/regressao.cjs
+@@ -0,0 +1,26 @@
++const fs=require('fs'),vm=require('vm'),assert=require('assert');
++const root=require('path').join(__dirname,'..','assets/');
++const fields=Object.fromEntries(Object.entries({bloodPressure:'120/80',temperature:'36.5',oxygen:'98',heartRate:'80',symptoms:'cefaleia'}).map(([k,value])=>[k,{value}]));
++const c={window:{alert(){}},localStorage:{getItem(){return null},setItem(){}},document:{getElementById:id=>fields[id]},crypto:require('crypto').webcrypto,FormData:class{constructor(form){this.form=form}get(k){return this.form[k]??null}},console};vm.createContext(c);
++for(const n of ['state','cadastro','triagem','fila'])vm.runInContext(fs.readFileSync(root+n+'.js','utf8'),c);
++let passed=0;function test(name,fn){fn();passed++;console.log('PASS',name)}
++const T=c.window.TriageController,t=new T({}, {}, {}, {});
++test('BUG03 pressão com barra',()=>{fields.bloodPressure.value='180/110';assert.equal(t.calculateSuggestion(),'vermelho');fields.bloodPressure.value='120/80'});
++test('BUG04 decimais ponto e vírgula',()=>{for(const v of ['38.5','38,5']){fields.temperature.value=v;assert.equal(t.calculateSuggestion(),'vermelho')}fields.temperature.value='37.8';assert.equal(t.calculateSuggestion(),'amarelo');fields.temperature.value='36.5'});
++test('BUG05 formulário vazio não classifica',()=>{const old=fields.oxygen.value;fields.oxygen.value='';assert.equal(t.calculateSuggestion(),null);fields.oxygen.value=old});
++test('BUG08 validação numérica',()=>{for(const v of ['101','-1','abc','98xyz']){fields.oxygen.value=v;assert.ok(t.readVitals().error)}fields.oxygen.value='98';fields.temperature.value='abc';assert.ok(t.readVitals().error);fields.temperature.value='36.5'});
++const state=new c.window.AppState('p','t');state.patients=[{id:'a',firstName:'Ana',lastName:'Silva'},{id:'b',firstName:'Bruno',lastName:'Silva'}];let rendered=0;
++const q=new c.window.QueueController(state,{queueBoard:{},callNext:{}},{verde:'Verde',vermelho:'Vermelho'},{verde:'green',vermelho:'red'},{renderAll(){rendered++}});
++test('BUG01 prioridade e desempate',()=>{state.triages=[{id:'g',patientId:'a',classification:'verde'},{id:'r1',patientId:'b',classification:'vermelho',createdAt:'2026-10-24T10:00:00Z'},{id:'r2',patientId:'b',classification:'vermelho',createdAt:'2026-10-24T11:00:00Z'}];assert.equal(q.orderedTriages()[0].id,'r1');q.callNext();assert.equal(state.triages.length,2);assert.equal(q.orderedTriages()[0].id,'r2')});
++const dom={patientList:{},patientSearch:{value:'bruno'}};const reg=new c.window.PatientRegistration(state,dom,{renderAll(){},selectPatient(){}});
++test('BUG02 remoção por ID com filtro',()=>{reg.render();assert.ok(dom.patientList.innerHTML.includes('data-delete-patient="b"'));reg.handleListClick({target:{closest:s=>s==='[data-delete-patient]'?{dataset:{deletePatient:'b'}}:null}});assert.equal(state.patients[0].id,'a');assert.equal(state.patients.length,1)});
++test('BUG11 nome completo caixa e acento',()=>{state.patients[0].lastName='Sílva';dom.patientSearch.value='SILVA';reg.render();assert.ok(dom.patientList.innerHTML.includes('Ana'))});
++test('BUG07 codificação de conteúdo e atributos',()=>{assert.equal(vm.runInContext('escapeHTML(`<img src=x onerror="alert(1)">`)',c),'&lt;img src=x onerror=&quot;alert(1)&quot;&gt;');state.patients[0].address='<b>texto</b>';reg.render();assert.ok(dom.patientList.innerHTML.includes('&lt;b&gt;texto&lt;/b&gt;'));assert.ok(!dom.patientList.innerHTML.includes('<b>texto'))});
++const td={triageForm:{reset(){Object.values(fields).forEach(x=>x.value='')}},triagePatient:{value:''},riskSuggestion:{},triageMessage:{},patientSummary:{},vitalPreview:{}};const tr=new T(state,td,{showMessage:(target,msg)=>target.textContent=msg,renderAll(){}},{verde:'Verde'});
++test('BUG06 troca limpa dados e classificação',()=>{state.selectedPatientId='old';fields.symptoms.value='Paciente anterior';tr.selectPatient('a');assert.equal(fields.symptoms.value,'');assert.equal(state.selectedPatientId,'a');assert.equal(td.riskSuggestion.textContent,'Sem sugestão')});
++test('BUG12 identificação completa',()=>{tr.renderPatientOptions();assert.ok(td.triagePatient.innerHTML.includes('Ana Sílva — a'))});
++test('BUG10 triagem duplicada bloqueada',()=>{for(const [id,v] of Object.entries({bloodPressure:'120/80',temperature:'36.5',oxygen:'98',heartRate:'80',symptoms:'cefaleia'}))fields[id].value=v;state.triages=[{id:'one',patientId:'a',classification:'verde'}];td.triageForm.classification='verde';tr.handleSubmit({preventDefault(){}});assert.equal(state.triages.length,1);assert.ok(td.triageMessage.textContent.includes('já está na fila'))});
++test('BUG08 idade inválida bloqueada',()=>{let message='';const data={firstName:'Ana',lastName:'Silva',age:'-1',gender:'Feminino',address:'Rua',insuranceName:'SUS',insuranceCard:'1'};const r=new c.window.PatientRegistration(state,{patientForm:data,patientMessage:{}},{showMessage:(_,msg)=>message=msg});r.handleSubmit({preventDefault(){}});assert.ok(message.includes('idade inteira'))});
++test('BUG09 JSON corrompido preservado e gravação bloqueada',()=>{c.localStorage.getItem=()=>'{bad';const broken=new c.window.AppState('p','t');assert.equal(broken.storageBlocked,true);assert.equal(broken.save(),false);c.localStorage.getItem=()=>null});
++test('falha de persistência cancela chamada',()=>{const original=state.triages;state.save=()=>false;q.callNext();assert.equal(state.triages,original)});
++console.log(`${passed} testes aprovados`);
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,12 @@
++{
++  "name": "sistema-triagem",
++  "version": "1.1.1",
++  "private": true,
++  "description": "Sistema educacional de cadastro, triagem e fila com correções de bugs",
++  "scripts": {
++    "test": "node tests/regressao.cjs"
++  },
++  "engines": {
++    "node": ">=18"
++  }
++}

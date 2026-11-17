@@ -1,0 +1,152 @@
+--- a/assets/triagem.js
++++ b/assets/triagem.js
+@@ -16,29 +16,43 @@
+     this.dom.clearTriageForm.addEventListener("click", () => this.reset());
+   }
+ 
+-  selectPatient() {
+-    this.state.selectedPatientId = this.dom.triagePatient.value;
+-    this.renderPatientSummary();
++  selectPatient(id = this.dom.triagePatient.value) {
++    if (id !== this.state.selectedPatientId) {
++      this.dom.triageForm.reset();
++      this.dom.riskSuggestion.textContent = "Sem sugestão";
++      this.dom.triageMessage.textContent = "";
++    }
++    this.state.selectedPatientId = this.state.patients.some(p => p.id === id) ? id : "";
++    this.renderPatientOptions(); this.renderPatientSummary(); this.renderVitalPreview();
+   }
+-
+   parseBloodPressure(value) {
+-    const parts = value.split("-");
+-    return {
+-      systolic: Number(parts[0]),
+-      diastolic: Number(parts[1])
+-    };
++    const parts = String(value).trim().match(/^(\d{1,3})\s*\/\s*(\d{1,3})$/);
++    if (!parts) return {systolic:NaN, diastolic:NaN};
++    return {systolic:Number(parts[1]), diastolic:Number(parts[2])};
+   }
+-
++  readVitals() {
++    const read = id => document.getElementById(id).value.trim();
++    const decimal = value => /^(?:\d+(?:[.,]\d+)?|[.,]\d+)$/.test(value) ? Number(value.replace(",", ".")) : NaN;
++    const pressure = this.parseBloodPressure(read("bloodPressure"));
++    const temperature = decimal(read("temperature")), oxygen = decimal(read("oxygen"));
++    const heartRate = read("heartRate") ? decimal(read("heartRate")) : null;
++    const symptoms = read("symptoms");
++    let error = "";
++    if (!Number.isFinite(pressure.systolic) || !Number.isFinite(pressure.diastolic) || pressure.systolic <= 0 || pressure.diastolic <= 0 || pressure.systolic <= pressure.diastolic) error = "Informe pressão válida no formato 120/80, com sistólica maior que diastólica.";
++    else if (!Number.isFinite(temperature) || temperature <= 0) error = "Informe temperatura numérica positiva, com ponto ou vírgula.";
++    else if (!Number.isFinite(oxygen) || oxygen < 0 || oxygen > 100) error = "Informe oxigenação entre 0 e 100%.";
++    else if (heartRate !== null && (!Number.isInteger(heartRate) || heartRate <= 0)) error = "Informe frequência cardíaca inteira positiva ou deixe em branco.";
++    else if (!symptoms) error = "Informe sintomas e observações.";
++    return {pressure,temperature,oxygen,heartRate,symptoms,error};
++  }
+   normalizeClassification(value) {
+     return value || "branco";
+   }
+ 
+   calculateSuggestion() {
+-    const pressure = this.parseBloodPressure(document.getElementById("bloodPressure").value);
+-    const temperature = parseInt(document.getElementById("temperature").value, 10);
+-    const oxygen = Number(document.getElementById("oxygen").value);
+-    const symptoms = document.getElementById("symptoms").value.toLowerCase();
+-    const heartRate = Number(document.getElementById("heartRate").value);
++    const {pressure, temperature, oxygen, symptoms: rawSymptoms, heartRate, error} = this.readVitals();
++    if (error) return null;
++    const symptoms = rawSymptoms.toLowerCase();
+     let risk = "verde";
+     if (oxygen < 90 || pressure.systolic >= 180 || temperature >= 38.5 || symptoms.includes("dor no peito") || symptoms.includes("convuls")) {
+       risk = "vermelho";
+@@ -51,6 +65,13 @@
+   }
+ 
+   suggestRisk() {
++    const vitals = this.readVitals();
++    if (vitals.error) {
++      this.callbacks.showMessage(this.dom.triageMessage, vitals.error);
++      this.dom.riskSuggestion.textContent = "Dados inválidos";
++      document.querySelectorAll('[name="classification"]').forEach(input => input.checked = false);
++      return;
++    }
+     const risk = this.calculateSuggestion();
+     const riskInput = document.querySelector(`[name="classification"][value="${risk}"]`);
+     if (riskInput) {
+@@ -62,13 +83,20 @@
+   handleSubmit(event) {
+     event.preventDefault();
+     const data = new FormData(this.dom.triageForm);
+-    const classification = this.normalizeClassification(data.get("classification"));
++    const classification = data.get("classification");
++    const vitals = this.readVitals();
++    if (vitals.error) { this.callbacks.showMessage(this.dom.triageMessage, vitals.error); return; }
++    if (!Object.hasOwn(this.priorityLabels, classification)) { this.callbacks.showMessage(this.dom.triageMessage, "Selecione uma classificação."); return; }
++    if (!this.state.getSelectedPatient()) { this.callbacks.showMessage(this.dom.triageMessage, "Selecione um paciente válido."); return; }
++    if (this.state.triages.some(item => item.patientId === this.state.selectedPatientId)) {
++      this.callbacks.showMessage(this.dom.triageMessage, "Este paciente já está na fila. Não é possível duplicar a triagem."); return;
++    }
+     if (!this.state.selectedPatientId || !data.get("bloodPressure") || !data.get("temperature") || !data.get("oxygen") || !data.get("symptoms")) {
+       this.callbacks.showMessage(this.dom.triageMessage, "Preencha todos os dados da triagem.");
+       return;
+     }
+     this.state.triages.push({
+-      id: crypto.randomUUID(),
++      id: createRecordId(),
+       patientId: this.state.selectedPatientId,
+       bloodPressure: data.get("bloodPressure"),
+       temperature: data.get("temperature"),
+@@ -76,12 +104,13 @@
+       heartRate: data.get("heartRate"),
+       symptoms: data.get("symptoms").trim(),
+       classification,
++      createdAt: new Date().toISOString(),
+       time: new Date().toLocaleTimeString("pt-BR", {
+         hour: "2-digit",
+         minute: "2-digit"
+       })
+     });
+-    this.state.save();
++    if (!this.state.save()) { this.state.triages.pop(); return; }
+     this.reset();
+     this.callbacks.showMessage(this.dom.triageMessage, "Triagem registrada.");
+     this.callbacks.renderAll();
+@@ -102,7 +131,7 @@
+       return;
+     }
+     this.dom.triagePatient.innerHTML = `<option value="">Selecionar paciente</option>` + this.state.patients.map((patient) => `
+-      <option value="${patient.id}">${patient.firstName}</option>
++      <option value="${escapeHTML(patient.id)}">${escapeHTML(this.state.getPatientName(patient))} — ${escapeHTML(patient.id)}</option>
+     `).join("");
+     this.dom.triagePatient.value = this.state.selectedPatientId;
+   }
+@@ -114,11 +143,11 @@
+       return;
+     }
+     this.dom.patientSummary.innerHTML = `
+-      <div class="summary-row"><span>Nome</span><strong>${this.state.getPatientName(patient)}</strong></div>
+-      <div class="summary-row"><span>Idade</span><strong>${patient.age}</strong></div>
+-      <div class="summary-row"><span>Gênero</span><strong>${patient.gender}</strong></div>
+-      <div class="summary-row"><span>Convênio</span><strong>${patient.insuranceName}</strong></div>
+-      <div class="summary-row"><span>Plano</span><strong>${patient.insurancePlan}</strong></div>
++      <div class="summary-row"><span>Nome</span><strong>${escapeHTML(this.state.getPatientName(patient))}</strong></div>
++      <div class="summary-row"><span>Idade</span><strong>${escapeHTML(patient.age)}</strong></div>
++      <div class="summary-row"><span>Gênero</span><strong>${escapeHTML(patient.gender)}</strong></div>
++      <div class="summary-row"><span>Convênio</span><strong>${escapeHTML(patient.insuranceName)}</strong></div>
++      <div class="summary-row"><span>Plano</span><strong>${escapeHTML(patient.insurancePlan)}</strong></div>
+     `;
+   }
+ 
+@@ -129,9 +158,9 @@
+     const oxygenNumber = Number(oxygen);
+     const oxygenClass = oxygenNumber < 90 ? "alert" : "";
+     this.dom.vitalPreview.innerHTML = `
+-      <div class="vital-row"><span>Pressão</span><strong>${pressure}</strong></div>
+-      <div class="vital-row"><span>Temperatura</span><strong>${temperature} °C</strong></div>
+-      <div class="vital-row"><span>Oxigenação</span><strong class="${oxygenClass}">${oxygen}%</strong></div>
++      <div class="vital-row"><span>Pressão</span><strong>${escapeHTML(pressure)}</strong></div>
++      <div class="vital-row"><span>Temperatura</span><strong>${escapeHTML(temperature)} °C</strong></div>
++      <div class="vital-row"><span>Oxigenação</span><strong class="${escapeHTML(oxygenClass)}">${escapeHTML(oxygen)}%</strong></div>
+     `;
+   }
+ }
