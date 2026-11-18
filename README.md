@@ -61,4 +61,6 @@ Use dados fictícios para estudo. A sugestão de classificação não é um prot
 
 ## Licença
 
-Não foi definida licença de código aberto. Escolha uma licença considerando os direitos e a autoria antes de autorizar reutilização por terceiros.
+Este projeto é distribuído sob a **GNU General Public License, versão 3 (GPL-3.0-only)**. Consulte o texto completo no arquivo [LICENSE](LICENSE).
+
+Este programa é software livre: você pode redistribuí-lo e/ou modificá-lo sob os termos da GNU GPL versão 3, publicada pela Free Software Foundation. É distribuído sem qualquer garantia, conforme os termos da licença.
